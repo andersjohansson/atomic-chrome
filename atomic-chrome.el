@@ -103,12 +103,21 @@ corresponding major modes."
                 :value-type (function :tag "major mode"))
   :group 'atomic-chrome)
 
-(defcustom atomic-chrome-url-filter-alist nil
-  "Association list to select a filter for a website.
+(defcustom atomic-chrome-url-transformer-alist nil
+  "Association list to select a transformer for a website.
 Relates URL (or, for GhostText, hostname) regular expressions to
-corresponding filters."
-  :type '(alist :key-type (regexp :tag "regexp")
-                :value-type (function :tag "filter"))
+corresponding transformers. Transformer is a cons of input
+transformer and output transformer. Input transformer takes a
+string as input and inserts it transformed into buffer. Output
+transformer takes text from buffer and returns transformed string."
+  :type '(alist :key-type (regexp :tag "url matching regexp")
+                :value-type (cons
+                             (choice
+                              (const :tag "None" nil)
+                              (function :tag "input transformer"))
+                             (choice
+                              (const :tag "None" nil)
+                              (function :tag "output transformer"))))
   :group 'atomic-chrome)
 
 (defcustom atomic-chrome-edit-mode-hook nil
@@ -141,10 +150,16 @@ Looks in `atomic-chrome-buffer-table'."
 Looks in `atomic-chrome-buffer-table'."
   (nth 1 (gethash buffer atomic-chrome-buffer-table)))
 
-(defun atomic-chrome-get-filter (buffer)
-  "Look up filter associated with buffer BUFFER.
+(defun atomic-chrome-get-transformer-in (buffer)
+  "Look up input transformer associated with buffer BUFFER.
 Looks in `atomic-chrome-buffer-table'."
-  (nth 2 (gethash buffer atomic-chrome-buffer-table)))
+  (car-safe (nth 2 (gethash buffer atomic-chrome-buffer-table))))
+
+(defun atomic-chrome-get-transformer-out (buffer)
+  "Look up output transformer associated with buffer BUFFER.
+Looks in `atomic-chrome-buffer-table'."
+  (cdr-safe (nth 2 (gethash buffer atomic-chrome-buffer-table))))
+
 
 (defun atomic-chrome-get-buffer-by-socket (socket)
   "Look up buffer which is associated to the websocket SOCKET.
@@ -167,8 +182,8 @@ Looks in `atomic-chrome-buffer-table'."
   (interactive)
   (let ((socket (atomic-chrome-get-websocket (current-buffer)))
         (text
-         (if-let (filter (atomic-chrome-get-filter (current-buffer)))
-             (funcall filter)
+         (if-let (transformer (atomic-chrome-get-transformer-out (current-buffer)))
+             (funcall transformer)
            (buffer-substring-no-properties (point-min) (point-max)))))
     (when (and socket text)
       (websocket-send-text
@@ -230,10 +245,12 @@ TITLE is used for the buffer name and TEXT is inserted to the buffer."
                (list
                 socket
                 (atomic-chrome-show-edit-buffer buffer title)
-                (and url (assoc-default url atomic-chrome-url-filter-alist 'string-match)))
+                (and url (assoc-default url atomic-chrome-url-transformer-alist 'string-match)))
                atomic-chrome-buffer-table)
       (atomic-chrome-set-major-mode url)
-      (insert text))))
+      (if-let (transformer-in (atomic-chrome-get-transformer-in buffer))
+          (funcall transformer-in text)
+        (insert text)))))
 
 (defun atomic-chrome-close-edit-buffer (buffer)
   "Close buffer BUFFER if it's one of Atomic Chrome edit buffers."
@@ -261,7 +278,9 @@ TITLE is used for the buffer name and TEXT is inserted to the buffer."
     (when buffer
       (with-current-buffer buffer
         (erase-buffer)
-        (insert text)))))
+        (if-let (transformer-in (atomic-chrome-get-transformer-in buffer))
+            (funcall transformer-in text)
+          (insert text))))))
 
 (defun atomic-chrome-on-message (socket frame)
   "Handle data received from the websocket client specified by SOCKET.
