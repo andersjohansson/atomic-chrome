@@ -194,6 +194,22 @@ corresponding major modes."
                 :value-type (function :tag "major mode"))
   :group 'atomic-chrome)
 
+(defcustom atomic-chrome-url-transformer-alist nil
+  "Association list to select a transformer for a website.
+Relates URL (or, for GhostText, hostname) regular expressions to
+corresponding transformers. Transformer is a cons of input transformer and output transformer.
+Input transformer takes a string as input and inserts it transformed into buffer.
+Output tranformer takes text from buffer and returns transformer string."
+  :type '(alist :key-type (regexp :tag "url matching regexp")
+                :value-type (cons
+                             (choice
+                              (const :tag "None" nil)
+                              (function :tag "input transformer"))
+                             (choice
+                              (const :tag "None" nil)
+                              (function :tag "output transformer"))))
+  :group 'atomic-chrome)
+
 (defcustom atomic-chrome-edit-mode-hook nil
   "Customizable hook which run when the editing buffer is created."
   :type 'hook
@@ -395,6 +411,17 @@ Looks in `atomic-chrome-buffer-table'."
 Looks in `atomic-chrome-buffer-table'."
   (nth 2 (gethash buffer atomic-chrome-buffer-table)))
 
+(defun atomic-chrome-get-transformer-in (buffer)
+  "Look up input transformer associated with buffer BUFFER.
+Looks in `atomic-chrome-buffer-table'."
+  (car-safe (nth 3 (gethash buffer atomic-chrome-buffer-table))))
+
+(defun atomic-chrome-get-transformer-out (buffer)
+  "Look up output transformer associated with buffer BUFFER.
+Looks in `atomic-chrome-buffer-table'."
+  (cdr-safe (nth 3 (gethash buffer atomic-chrome-buffer-table))))
+
+
 (defun atomic-chrome-get-buffer-by-socket (socket)
   "Look up buffer which is associated to the websocket SOCKET.
 Looks in `atomic-chrome-buffer-table'."
@@ -506,6 +533,8 @@ and `atomic-chrome-max-text-size-for-selection-sync' respectively. These limits
 help ensure performance stability by preventing extensive computation for very
 large texts.
 
+If a transformer according to ‘atomic-chrome-url-transformer-alist’ should be applied, no position and selection information is included.
+
 The payload is returned as a list of cons cells:
 
 - The key `text' is paired with the buffer's string content.
@@ -521,27 +550,28 @@ formats."
   (save-excursion
     (save-restriction
       (widen)
-      (let ((data (list (cons "text" (buffer-substring-no-properties
-                                      (point-min)
-                                      (point-max)))))
-            (size))
-        (when (or (eq atomic-chrome-max-text-size-for-position-sync t)
-                  (and atomic-chrome-max-text-size-for-position-sync
-                       (progn
-                         (setq size (buffer-size))
-                         (> atomic-chrome-max-text-size-for-position-sync size))))
-          (setq data
-                (nconc data
-                       (atomic-chrome--get-position-data))))
-        (when (or (eq atomic-chrome-max-text-size-for-selection-sync t)
-                  (and atomic-chrome-max-text-size-for-selection-sync
-                       (> atomic-chrome-max-text-size-for-selection-sync
-                          (or size
-                              (buffer-size)))))
-          (setq data
-                (nconc data (atomic-chrome--get-selections-data))))
-        data))))
-
+      (let (data size)
+        (if-let ((transformer-out (atomic-chrome-get-transformer-out (current-buffer))))
+            (setq data (list (cons "text" (funcall transformer-out))))
+          (setq data (list (cons "text" (buffer-substring-no-properties
+                                         (point-min)
+                                         (point-max)))))
+          (when (or (eq atomic-chrome-max-text-size-for-position-sync t)
+                    (and atomic-chrome-max-text-size-for-position-sync
+                         (progn
+                           (setq size (buffer-size))
+                           (> atomic-chrome-max-text-size-for-position-sync size))))
+            (setq data
+                  (nconc data
+                         (atomic-chrome--get-position-data))))
+          (when (or (eq atomic-chrome-max-text-size-for-selection-sync t)
+                    (and atomic-chrome-max-text-size-for-selection-sync
+                         (> atomic-chrome-max-text-size-for-selection-sync
+                            (or size
+                                (buffer-size)))))
+            (setq data
+                  (nconc data (atomic-chrome--get-selections-data))))
+          data)))))
 
 (defun atomic-chrome--send-buffer-text ()
   "Send request to update text with current buffer content."
@@ -896,10 +926,13 @@ the cursor at."
                (list socket (atomic-chrome-show-edit-buffer
                              buffer title
                              rect)
-                     (list url title extension))
+                     (list url title extension)
+                     (and url (assoc-default url atomic-chrome-url-transformer-alist 'string-match)))
                atomic-chrome-buffer-table)
       (let ((buffer-undo-list t))
-        (insert text))
+        (if-let (transformer-in (atomic-chrome-get-transformer-in buffer))
+            (funcall transformer-in text)
+          (insert text)))
       (when (and file atomic-chrome-make-file-save-initial-contents)
         (save-buffer))
       (atomic-chrome-set-major-mode url)
@@ -964,7 +997,9 @@ after the update."
       (with-current-buffer buffer
         (unless (string= (buffer-string) text)
           (erase-buffer)
-          (insert text))
+          (if-let (transformer-in (atomic-chrome-get-transformer-in buffer))
+              (funcall transformer-in text)
+            (insert text)))
         (atomic-chrome--goto-position line column)))))
 
 (defun atomic-chrome--json-parse-string (str &optional object-type array-type
