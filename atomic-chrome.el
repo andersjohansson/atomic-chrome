@@ -103,6 +103,14 @@ corresponding major modes."
                 :value-type (function :tag "major mode"))
   :group 'atomic-chrome)
 
+(defcustom atomic-chrome-url-filter-alist nil
+  "Association list to select a filter for a website.
+Relates URL (or, for GhostText, hostname) regular expressions to
+corresponding filters."
+  :type '(alist :key-type (regexp :tag "regexp")
+                :value-type (function :tag "filter"))
+  :group 'atomic-chrome)
+
 (defcustom atomic-chrome-edit-mode-hook nil
   "Customizable hook which run when the editing buffer is created."
   :type 'hook
@@ -121,7 +129,7 @@ corresponding major modes."
 
 (defvar atomic-chrome-buffer-table (make-hash-table :test 'equal)
   "Hash table of editing buffer and its assciated data.
-Each element has a list consisting of (websocket, frame).")
+Each element has a list consisting of (websocket, frame, filter).")
 
 (defun atomic-chrome-get-websocket (buffer)
   "Look up websocket associated with buffer BUFFER.
@@ -132,6 +140,11 @@ Looks in `atomic-chrome-buffer-table'."
   "Look up frame associated with buffer BUFFER.
 Looks in `atomic-chrome-buffer-table'."
   (nth 1 (gethash buffer atomic-chrome-buffer-table)))
+
+(defun atomic-chrome-get-filter (buffer)
+  "Look up filter associated with buffer BUFFER.
+Looks in `atomic-chrome-buffer-table'."
+  (nth 2 (gethash buffer atomic-chrome-buffer-table)))
 
 (defun atomic-chrome-get-buffer-by-socket (socket)
   "Look up buffer which is associated to the websocket SOCKET.
@@ -153,7 +166,10 @@ Looks in `atomic-chrome-buffer-table'."
   "Send request to update text with current buffer content."
   (interactive)
   (let ((socket (atomic-chrome-get-websocket (current-buffer)))
-        (text (buffer-substring-no-properties (point-min) (point-max))))
+        (text
+         (if-let (filter (atomic-chrome-get-filter (current-buffer)))
+             (funcall filter)
+           (buffer-substring-no-properties (point-min) (point-max)))))
     (when (and socket text)
       (websocket-send-text
        socket
@@ -211,8 +227,11 @@ TITLE is used for the buffer name and TEXT is inserted to the buffer."
   (let ((buffer (generate-new-buffer (if (string-empty-p title) "No title" title))))
     (with-current-buffer buffer
       (puthash buffer
-             (list socket (atomic-chrome-show-edit-buffer buffer title))
-             atomic-chrome-buffer-table)
+               (list
+                socket
+                (atomic-chrome-show-edit-buffer buffer title)
+                (and url (assoc-default url atomic-chrome-url-filter-alist 'string-match)))
+               atomic-chrome-buffer-table)
       (atomic-chrome-set-major-mode url)
       (insert text))))
 
